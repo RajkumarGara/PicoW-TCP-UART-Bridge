@@ -30,6 +30,9 @@ typedef struct PicoDevice {
     char pts_name[256];
     uv_stream_t *stream;
     struct PicoDevice *next;
+    int encryption_supported; // 0 = no encryption, 1 = encryption supported
+    unsigned char encryption_key[32]; // AES-256 key
+    unsigned char iv[AES_BLOCK_SIZE]; // Initialization Vector for AES
 } PicoDevice;
 
 PicoDevice *picoDevices = NULL;
@@ -241,8 +244,17 @@ void on_pty_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
     PicoDevice *picoDevice = stream->data;
     if (nread > 0) {
         uv_write_t *write_req = (uv_write_t *)malloc(sizeof(uv_write_t));
-        uv_buf_t write_buf = uv_buf_init(buf->base, nread);
-        write_req->data = buf->base;
+        unsigned char encrypted_data[1024];
+
+        if (picoDevice->encryption_supported) {
+            encrypt_message((unsigned char *)buf->base, nread, picoDevice->encryption_key, picoDevice->iv, encrypted_data);
+            uv_buf_t write_buf = uv_buf_init((char *)encrypted_data, nread);
+            write_req->data = (void *)encrypted_data;
+        } else {
+            uv_buf_t write_buf = uv_buf_init(buf->base, nread);
+            write_req->data = buf->base;
+        }
+
         uv_write(write_req, (uv_stream_t *)picoDevice->client, &write_buf, 1, on_client_write);
         char *log_buf = (char *)malloc(nread + 1);
         memcpy(log_buf, buf->base, nread);
@@ -279,7 +291,15 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
         char *end = message + strlen(message) - 1;
         while (end > message && isspace(*end)) *end-- = '\0';
 
-        if (strncmp(message, "pico_", 5) == 0) {
+        // Check if the Pico supports encryption
+        if (strncmp(message, "pico_encrypt", 12) == 0) {
+            picoDevice->encryption_supported = 1;
+            // Here we could derive or set an encryption key and IV
+            RAND_bytes(picoDevice->encryption_key, sizeof(picoDevice->encryption_key));
+            RAND_bytes(picoDevice->iv, AES_BLOCK_SIZE);
+            logMessage("Pico%d supports encryption.", picoDevice->picoNumber);
+        } else if (strncmp(message, "pico_", 5) == 0) {
+            // Handle Pico device connection and identification as before
             char serialId[256];
             strncpy(serialId, message + 5, sizeof(serialId) - 1);
             serialId[sizeof(serialId) - 1] = '\0';
@@ -305,6 +325,11 @@ void on_client_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
                 picoDevice->pty_pipe->data = picoDevice;
             }
         } else if (picoDevice->picoNumber > 0) {
+            unsigned char plaintext[1024];
+            if (picoDevice->encryption_supported) {
+                decrypt_message((unsigned char *)message, strlen(message), picoDevice->encryption_key, picoDevice->iv, plaintext);
+                strcpy(message, (char *)plaintext);  // Decrypt message and store in the original buffer
+            }
             uv_write_t *write_req = (uv_write_t *)malloc(sizeof(uv_write_t));
             size_t msg_len = strlen(message);
             char *msg_with_cr = (char *)malloc(msg_len + 2);
