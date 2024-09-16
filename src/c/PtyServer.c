@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <stdarg.h>
+#include <openssl/aes.h>
+#include <openssl/rand.h>
 
 #define DEFAULT_TCP_PORT 5000
 #define SYMLINK_DIR "/home/project"
@@ -165,6 +167,34 @@ void cleanPicoResources(PicoDevice *picoDevice) {
 void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
     buf->base = (char *)malloc(suggested_size);
     buf->len = suggested_size;
+}
+
+void decrypt_message(const unsigned char *ciphertext, int ciphertext_len, const unsigned char *key, unsigned char *iv, unsigned char *plaintext) {
+    AES_KEY aes_key;
+
+    // Initialize decryption key structure
+    if (AES_set_decrypt_key(key, 256, &aes_key) < 0) {
+        fprintf(stderr, "Failed to set decryption key.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Decrypt the data using AES CFB mode
+    int num = 0; // Used internally by AES_cfb128_encrypt
+    AES_cfb128_encrypt(ciphertext, plaintext, ciphertext_len, &aes_key, iv, &num, AES_DECRYPT);
+}
+
+void encrypt_message(const unsigned char *plaintext, int plaintext_len, const unsigned char *key, unsigned char *iv, unsigned char *ciphertext) {
+    AES_KEY aes_key;
+
+    // Initialize encryption key structure
+    if (AES_set_encrypt_key(key, 256, &aes_key) < 0) {
+        fprintf(stderr, "Failed to set encryption key.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // Encrypt the data using AES CFB mode
+    int num = 0; // Used internally by AES_cfb128_encrypt
+    AES_cfb128_encrypt(plaintext, ciphertext, plaintext_len, &aes_key, iv, &num, AES_ENCRYPT);
 }
 
 void on_pty_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf);
