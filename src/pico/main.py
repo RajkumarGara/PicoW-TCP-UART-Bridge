@@ -3,20 +3,22 @@ import socket
 import time
 import json
 from machine import UART, Pin
+import ssl  # Import the ssl module for encryption
 
 def read_config():
     with open('config.json', 'r') as f:
         return json.load(f)
 
-# Load network credentials from config file
+# Load network credentials and other configurations from config file
 config = read_config()
 
 # Update Network and Server details
-WIFI_SSID 	  = config['WIFI_SSID']
+WIFI_SSID     = config['WIFI_SSID']
 WIFI_PASSWORD = config['WIFI_PASSWORD']
 IP_ADDRESS    = config['IP_ADDRESS']
 TCP_PORT      = config['PORT']
 PICO_ID       = config['PICO_ID']
+ENCRYPT       = config.get('ENCRYPT', False)  # Load encryption setting
 
 # Initialize UART and LED
 uart1 = UART(1, 19200)
@@ -45,7 +47,26 @@ def create_tcp_connection():
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((IP_ADDRESS, TCP_PORT))
+
+            # Check if encryption is enabled
+            if ENCRYPT:
+                print("Establishing an encrypted connection...")
+
+                # Create SSL context
+                context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                context.load_cert_chain(certfile='client.crt', keyfile='client.key')
+                context.load_verify_locations(cafile='ca.crt')
+
+                # Wrap the socket with SSL
+                secure_sock = context.wrap_socket(sock, server_hostname=IP_ADDRESS)
+                secure_sock.connect((IP_ADDRESS, TCP_PORT))
+                sock = secure_sock  # Replace the plain socket with the secure one
+
+            else:
+                # Plain TCP connection
+                print("Establishing an unencrypted connection...")
+                sock.connect((IP_ADDRESS, TCP_PORT))
+
             led.on()
             return sock
         
@@ -73,7 +94,6 @@ try:
             rxed = uart1.read().decode('utf-8').rstrip()
             s.send(rxed.encode()) # Send the uart received data to the TCP server
             blink_led()
-            #print("Serial: ", rxed)
 
         # Non-blocking mode to avoid halting the execution if no data is available.
         s.setblocking(False)
@@ -89,11 +109,10 @@ try:
                 print("Reconnected to server.")
                 continue
 
-            if data:	# Valid data received from TCP Server
+            if data:  # Valid data received from TCP Server
                 cmd = data.decode()
                 uart1.write(cmd)
                 blink_led()
-                #print("TCP: ", cmd)
 
         except Exception as e:
             pass  # No data received, normal for non-blocking call
