@@ -3,7 +3,9 @@ import socket
 import time
 import json
 from machine import UART, Pin
-import ssl  # Import the ssl module for encryption
+from Crypto.Cipher import AES
+from Crypto.Random import get_random_bytes
+import base64
 
 def read_config():
     with open('config.json', 'r') as f:
@@ -18,7 +20,12 @@ WIFI_PASSWORD = config['WIFI_PASSWORD']
 IP_ADDRESS    = config['IP_ADDRESS']
 TCP_PORT      = config['PORT']
 PICO_ID       = config['PICO_ID']
-ENCRYPT       = config.get('ENCRYPT', False)  # Load encryption setting
+ENCRYPT       = config.get('ENCRYPT', False)  # Load ENCRYPT, could be False or a PSK string
+
+# Determine whether encryption is enabled and set PSK
+PSK = None
+if ENCRYPT and isinstance(ENCRYPT, str):
+    PSK = ENCRYPT[:32].ljust(32)  # Use the PSK value if encryption is enabled, pad or truncate to 32 bytes
 
 # Initialize UART and LED
 uart1 = UART(1, 19200)
@@ -30,6 +37,19 @@ def blink_led():
     time.sleep(0.1)
     led.on()
     time.sleep(0.1)
+
+def encrypt_message(message, key):
+    # Generate a random initialization vector (IV)
+    iv = get_random_bytes(16)
+    cipher = AES.new(key.encode('utf-8'), AES.MODE_CFB, iv=iv)
+    encrypted_message = iv + cipher.encrypt(message.encode('utf-8'))
+    return base64.b64encode(encrypted_message).decode('utf-8')
+
+def decrypt_message(encrypted_message, key):
+    encrypted_message = base64.b64decode(encrypted_message)
+    iv = encrypted_message[:16]
+    cipher = AES.new(key.encode('utf-8'), AES.MODE_CFB, iv=iv)
+    return cipher.decrypt(encrypted_message[16:]).decode('utf-8')
 
 # Connect to Wi-Fi
 wlan = network.WLAN(network.STA_IF)
@@ -47,26 +67,7 @@ def create_tcp_connection():
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-            # Check if encryption is enabled
-            if ENCRYPT:
-                print("Establishing an encrypted connection...")
-
-                # Create SSL context
-                context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-                context.load_cert_chain(certfile='client.crt', keyfile='client.key')
-                context.load_verify_locations(cafile='ca.crt')
-
-                # Wrap the socket with SSL
-                secure_sock = context.wrap_socket(sock, server_hostname=IP_ADDRESS)
-                secure_sock.connect((IP_ADDRESS, TCP_PORT))
-                sock = secure_sock  # Replace the plain socket with the secure one
-
-            else:
-                # Plain TCP connection
-                print("Establishing an unencrypted connection...")
-                sock.connect((IP_ADDRESS, TCP_PORT))
-
+            sock.connect((IP_ADDRESS, TCP_PORT))
             led.on()
             return sock
         
@@ -78,6 +79,8 @@ def create_tcp_connection():
 # 'pico_ID' packet to initiate named pipe creation
 def send_hello_packet(sock):
     hello_message = f'pico_{PICO_ID}'
+    if PSK:
+        hello_message = encrypt_message(hello_message, PSK)
     sock.send(hello_message.encode())
 
 # Create initial TCP socket and connect
@@ -92,13 +95,15 @@ try:
         # Check for incoming UART data
         if uart1.any():
             rxed = uart1.read().decode('utf-8').rstrip()
-            s.send(rxed.encode()) # Send the uart received data to the TCP server
+            if PSK:
+                rxed = encrypt_message(rxed, PSK)
+            s.send(rxed.encode())  # Send the encrypted UART received data to the TCP server
             blink_led()
 
         # Non-blocking mode to avoid halting the execution if no data is available.
         s.setblocking(False)
         try:
-            data = s.recv(64) # Data received from TCP Server
+            data = s.recv(64)  # Data received from TCP Server
 
             if data == b'':  # Empty byte string indicates that the other side of the TCP connection has closed
                 s.close()  # Closes the socket on Pico-W's side      
@@ -111,6 +116,8 @@ try:
 
             if data:  # Valid data received from TCP Server
                 cmd = data.decode()
+                if PSK:
+                    cmd = decrypt_message(cmd, PSK)
                 uart1.write(cmd)
                 blink_led()
 
@@ -123,7 +130,7 @@ try:
 
 except Exception as e:
     print("An error occurred:", e)
-    
+
 finally:
     s.close()
     led.off()
